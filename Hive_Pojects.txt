@@ -1,0 +1,343 @@
+
+SHC_WIFI_ACCESS_PT_AVAIL Operation in hive
+
+
+drop table TMP_DLY_ACCESS_PT_AVAIL_TEMP;
+drop table TMP_DLY_ACCESS_PT_AVAIL;
+drop table TMP_DLY_ACCESS_PT_AVAIL_ORIGINAL;
+drop table SHC_WIFI_ACCESS_PT_AVAIL_VOLT;
+drop table A;
+drop table updated_values;
+drop table SHC_WIFI_ACCESS_PT_AVAIL_left_join_A;
+drop table non_updated_null_rows;
+drop table non_updated_rows;
+drop table UPDATED_FINAL;
+drop table SHC_WIFI_ACCESS_PT_AVAIL_right_join_A;
+drop table insert_null_rows;
+drop table INSERT_FINAL;
+drop table SHC_WIFI_ACCESS_PT_AVAIL_MERGE;
+
+
+LOAD DATA LOCAL INPATH '/staging/netwatch/motorola/combined/availability_summary_combiner_${hiveconf:CURRENT_DATE}.txt' OVERWRITE INTO TABLE ${hiveconf:AVAIL_STAGING_INPUT_TABLE};
+
+CREATE TABLE IF NOT EXISTS TMP_DLY_ACCESS_PT_AVAIL_TEMP AS 
+SELECT ACCESS_PT_NM,
+ STAT_DT,
+ STR_NBR,
+ ACCESS_PT_UNAVL_IND,
+ sum(ACCESS_PT_UNAVL_MINUT_QTY) ACCESS_PT_UNAVL_MINUT_QTY,
+ max(CREAT_TS) CREAT_TS
+ from
+ ${hiveconf:AVAIL_STAGING_INPUT_TABLE}
+ GROUP BY
+ ACCESS_PT_NM ,
+ STAT_DT,
+ STR_NBR,
+ ACCESS_PT_UNAVL_IND;
+
+CREATE TABLE IF NOT EXISTS TMP_DLY_ACCESS_PT_AVAIL AS SELECT ACCESS_PT_NM,STAT_DT,STR_NBR,ACCESS_PT_UNAVL_IND, ACCESS_PT_UNAVL_MINUT_QTY,CREAT_TS,CAST(SUBSTR(STR_NBR,2) AS INT) AS NEW_STR_NBR FROM TMP_DLY_ACCESS_PT_AVAIL_TEMP;
+
+CREATE TABLE IF NOT EXISTS TMP_DLY_ACCESS_PT_AVAIL_ORIGINAL AS SELECT ACCESS_PT_NM,STAT_DT,CONCAT(SUBSTR(STR_NBR,1,1),NEW_STR_NBR) AS STR_NBR,ACCESS_PT_UNAVL_IND,ACCESS_PT_UNAVL_MINUT_QTY,CREAT_TS FROM TMP_DLY_ACCESS_PT_AVAIL;
+
+DROP INDEX PI_TMP_DLY_ACCESS_PT_AVAIL_ORIGINAL ON TMP_DLY_ACCESS_PT_AVAIL_ORIGINAL;
+
+CREATE INDEX  PI_TMP_DLY_ACCESS_PT_AVAIL_ORIGINAL ON TABLE TMP_DLY_ACCESS_PT_AVAIL_ORIGINAL (STR_NBR ) AS 'org.apache.hadoop.hive.ql.index.compact.CompactIndexHandler'
+WITH DEFERRED REBUILD;
+
+CREATE TABLE IF NOT EXISTS SHC_WIFI_ACCESS_PT_AVAIL_VOLT
+AS SELECT STG.ACCESS_PT_NM ACCESS_PT_ID,
+ STG.STAT_DT ACCESS_PT_STAT_DT,
+ CASE WHEN LCN.LOCN_NBR IS NULL THEN -1 ELSE LCN.LOCN_NBR END LOCN_NBR,
+ STG.ACCESS_PT_UNAVL_IND,
+ STG.ACCESS_PT_UNAVL_MINUT_QTY ACCESS_PT_UNAVL_MINUT_QTY,
+ (year(current_date) - 1900) * 10000 + (month(current_date) * 100) + day(current_date) AS DATASET_ID,
+ STG.CREAT_TS,
+ CAST(NULL AS TIMESTAMP) MOD_TS
+ FROM TMP_DLY_ACCESS_PT_AVAIL_ORIGINAL STG LEFT OUTER JOIN ${hiveconf:REF_SHC_LOCATION_INPUT_TABLE} LCN
+ ON CAST(SUBSTR(STG.STR_NBR,2) AS INT) =LCN.LOCN_NBR;
+
+ DROP INDEX PI_SHC_WIFI_ACCESS_PT_AVAIL_VOLT ON SHC_WIFI_ACCESS_PT_AVAIL_VOLT;
+
+ CREATE INDEX  PI_SHC_WIFI_ACCESS_PT_AVAIL_VOLT ON TABLE SHC_WIFI_ACCESS_PT_AVAIL_VOLT (LOCN_NBR ) AS 'org.apache.hadoop.hive.ql.index.compact.CompactIndexHandler'
+ WITH DEFERRED REBUILD;
+
+CREATE TABLE IF NOT EXISTS A AS
+ SELECT CAST(ACCESS_PT_ID  AS varchar(25)) ,
+ ACCESS_PT_STAT_DT ,
+ LOCN_NBR ,
+ CAST(ACCESS_PT_UNAVL_MINUT_QTY AS INT) ,
+ ACCESS_PT_UNAVL_IND  ,
+ DATASET_ID ,
+ CREAT_TS ,
+ MOD_TS
+ FROM SHC_WIFI_ACCESS_PT_AVAIL_VOLT;
+
+ DROP INDEX PI_A ON A;
+
+ CREATE INDEX  PI_A ON TABLE A (ACCESS_PT_ID,LOCN_NBR,ACCESS_PT_STAT_DT ) AS 'org.apache.hadoop.hive.ql.index.compact.CompactIndexHandler'
+ WITH DEFERRED REBUILD;
+
+CREATE TABLE IF NOT EXISTS updated_values  AS select TRGT.access_pt_id ,TRGT.access_pt_stat_dt,TRGT.locn_nbr ,a.access_pt_unavl_minut_qty ,a.access_pt_unavl_ind,TRGT.dataset_id ,TRGT.creat_ts ,CURRENT_TIMESTAMP as mod_ts FROM ${hiveconf:AVAIL_TARGET_TABLE} TRGT,A a WHERE TRGT.ACCESS_PT_ID=a.ACCESS_PT_ID AND TRGT.LOCN_NBR=a.LOCN_NBR AND TRGT.ACCESS_PT_STAT_DT=a.ACCESS_PT_STAT_DT;
+
+CREATE TABLE IF NOT EXISTS  SHC_WIFI_ACCESS_PT_AVAIL_left_join_A as select TRGT.ACCESS_PT_ID,TRGT.LOCN_NBR,TRGT.ACCESS_PT_STAT_DT,a.access_pt_unavl_minut_qty,a.access_pt_unavl_ind,TRGT.dataset_id,TRGT.creat_ts,a.mod_ts FROM ${hiveconf:AVAIL_TARGET_TABLE} TRGT LEFT JOIN A a on (TRGT.ACCESS_PT_ID=a.ACCESS_PT_ID and TRGT.LOCN_NBR=a.LOCN_NBR and TRGT.ACCESS_PT_STAT_DT=a.ACCESS_PT_STAT_DT);
+
+CREATE TABLE IF NOT EXISTS non_updated_null_rows AS SELECT * from SHC_WIFI_ACCESS_PT_AVAIL_left_join_A WHERE access_pt_unavl_ind IS NULL;
+
+CREATE TABLE IF NOT EXISTS non_updated_rows as select TRGT.access_pt_id ,TRGT.access_pt_stat_dt,TRGT.locn_nbr,TRGT.access_pt_unavl_minut_qty,TRGT.access_pt_unavl_ind,TRGT.dataset_id ,TRGT.creat_ts ,TRGT.mod_ts FROM ${hiveconf:AVAIL_TARGET_TABLE} TRGT, non_updated_null_rows r WHERE TRGT.ACCESS_PT_ID=r.ACCESS_PT_ID AND TRGT.LOCN_NBR=r.LOCN_NBR AND TRGT.ACCESS_PT_STAT_DT=r.ACCESS_PT_STAT_DT AND TRGT.creat_ts=r.creat_ts AND TRGT.dataset_id=r.dataset_id;
+
+CREATE TABLE IF NOT EXISTS UPDATED_FINAL as select * from updated_values union all select distinct *  from non_updated_rows;
+
+CREATE TABLE IF NOT EXISTS SHC_WIFI_ACCESS_PT_AVAIL_right_join_A AS  select a.ACCESS_PT_ID,a.LOCN_NBR,a.ACCESS_PT_STAT_DT,TRGT.access_pt_unavl_minut_qty,TRGT.access_pt_unavl_ind,a.dataset_id,a.creat_ts,TRGT.mod_ts FROM ${hiveconf:AVAIL_TARGET_TABLE} TRGT RIGHT JOIN A a on (TRGT.ACCESS_PT_ID=a.ACCESS_PT_ID and TRGT.LOCN_NBR=a.LOCN_NBR and TRGT.ACCESS_PT_STAT_DT=a.ACCESS_PT_STAT_DT);
+
+CREATE TABLE IF NOT EXISTS insert_null_rows AS SELECT * FROM SHC_WIFI_ACCESS_PT_AVAIL_right_join_A where access_pt_unavl_ind IS NULL;
+
+CREATE TABLE IF NOT EXISTS INSERT_FINAL AS SELECT  a.access_pt_id ,a.access_pt_stat_dt,a.locn_nbr ,a.access_pt_unavl_minut_qty ,a.access_pt_unavl_ind,a.dataset_id,a.creat_ts ,a.mod_ts FROM A a,insert_null_rows i WHERE a.ACCESS_PT_ID=i.ACCESS_PT_ID AND a.LOCN_NBR=i.LOCN_NBR AND a.ACCESS_PT_STAT_DT=i.ACCESS_PT_STAT_DT AND a.creat_ts=i.creat_ts;
+
+CREATE TABLE IF NOT EXISTS SHC_WIFI_ACCESS_PT_AVAIL_MERGE  AS  SELECT * FROM  updated_values union all select distinct *  from non_updated_rows UNION ALL SELECT  distinct * FROM INSERT_FINAL;
+
+
+
+********************************************************************************************
+
+SHC_WIFI_ACCESS_PT_MINUT_AVAIL in hive
+
+set  hive.auto.convert.join=true
+set hive.mapjoin.smalltable.filesize=30
+
+LOAD DATA LOCAL INPATH '/staging/netwatch/motorola/combined/availability_summary_combiner_20170413.txt' OVERWRITE INTO TABLE ${hiveconf:AVAIL_STAGING_INPUT_TABLE};
+
+ drop table TMP_acc_pt_down_tm;
+ drop table TMP_acc_pt_minut_brk_dn;
+ drop table MINUT_A;
+ drop table updated_values_minut;
+ drop table SHC_WIFI_ACCESS_PT_MINUT_AVAIL_left_join_A;
+ drop table non_updated_null_rows_minut;
+ drop table non_updated_rows_minut;
+ drop table UPDATED_FINAL_MINUT;
+ drop table SHC_WIFI_ACCESS_PT_MINUT_AVAIL_right_join_A;
+ drop table insert_null_rows_minut;
+ drop table INSERT_FINAL_MINUT;
+ drop table  SHC_WIFI_ACCESS_PT_MINUT_AVAIL_MERGE;
+ drop table SHC_WIFI_ACCESS_PT_MINUT_AVAIL_left_join_A_without_map;
+
+
+CREATE TABLE  IF NOT EXISTS TMP_acc_pt_down_tm  as
+ SELECT ROW_NUMBER() OVER(ORDER BY a.STAT_DT ,
+   a.STR_NBR ,
+   a.ACCESS_PT_NM ,
+   a.ACCESS_PT_UNAVL_IND ,
+   a.ACCESS_PT_UNAVL_MINUT_QTY ,a.OUTAGE_BEG_TM,a.OUTAGE_END_TM ) row_num,
+   a.STAT_DT ,
+   a.STR_NBR ,
+   a.ACCESS_PT_NM ,
+   a.ACCESS_PT_UNAVL_IND ,
+   a.ACCESS_PT_UNAVL_MINUT_QTY ,
+   CAST( from_unixtime(unix_timestamp(OUTAGE_BEG_TM),'hh:MM a') AS CHAR(20)) OUTAGE_BEG_TM,
+   CAST( from_unixtime(unix_timestamp(OUTAGE_END_TM),'hh:MM a') AS CHAR(20)) OUTAGE_END_TM ,
+   B.ACCESS_PT_MINUT_DESC START_MINUT_DESC,
+   B.ACCESS_PT_MINUT_ID START_MINUT_ID,
+   C.ACCESS_PT_MINUT_DESC END_MINUT_DESC,
+   C.ACCESS_PT_MINUT_ID END_MINUT_ID
+   FROM ${hiveconf:AVAIL_STAGING_INPUT_TABLE} a,
+   ${hiveconf:LU_DEJ_MINUT_ID_TABLE} b,
+   ${hiveconf:LU_DEJ_MINUT_ID_TABLE} c
+   WHERE a.ACCESS_PT_UNAVL_MINUT_QTY >0
+   AND  CAST( from_unixtime(unix_timestamp(OUTAGE_BEG_TM),'hh:MM a') AS CHAR(20)) = b.ACCESS_PT_MINUT_DESC
+   AND  CAST( from_unixtime(unix_timestamp(OUTAGE_END_TM),'hh:MM a') AS CHAR(20)) = c.ACCESS_PT_MINUT_DESC;
+
+
+    CREATE TABLE IF NOT EXISTS TMP_acc_pt_minut_brk_dn
+    AS
+     SELECT
+     ACCESS_PT_ID,
+     ACCESS_PT_STAT_DT,
+     CAST(SUBSTR(LOCN_NBR,2) AS INT) LOCN_NBR,
+     CAST(ACCESS_PT_MINUT_ID AS SMALLINT) ACCESS_PT_MINUT_ID,
+     CAST(ACCESS_PT_UNAVL_IND AS CHAR(1) ) ACCESS_PT_UNAVL_IND,
+     (year(CURRENT_DATE) - 1900) * 10000 + (month(CURRENT_DATE) * 100) + day(CURRENT_DATE) DATASET_ID,
+     CURRENT_TIMESTAMP CREAT_TS,
+     CURRENT_TIMESTAMP MOD_TS
+     FROM
+     (
+      SELECT DISTINCT
+      a.row_num,
+      a.ACCESS_PT_NM ACCESS_PT_ID,
+      a.STAT_DT ACCESS_PT_STAT_DT,
+      a.STR_NBR LOCN_NBR,
+      b.ACCESS_PT_MINUT_ID ACCESS_PT_MINUT_ID,
+      '1' ACCESS_PT_UNAVL_IND
+      FROM
+      TMP_acc_pt_down_tm a,
+      ${hiveconf:LU_DEJ_MINUT_ID_TABLE} b
+      WHERE
+      b.ACCESS_PT_MINUT_ID BETWEEN a.START_MINUT_ID AND a.end_MINUT_ID
+     )a ;
+
+CREATE TABLE IF NOT EXISTS MINUT_A  AS 
+    SELECT
+    ACCESS_PT_ID ,
+    ACCESS_PT_STAT_DT,
+    LOCN_NBR ,
+    ACCESS_PT_MINUT_ID ,
+    ACCESS_PT_UNAVL_IND ,
+    DATASET_ID,
+    CREAT_TS,
+    MOD_TS
+    FROM
+    TMP_acc_pt_minut_brk_dn;
+	
+	
+	
+CREATE TABLE IF NOT EXISTS updated_values_minut  AS select TRGT.access_pt_id ,TRGT.access_pt_stat_dt,TRGT.locn_nbr ,TRGT.ACCESS_PT_MINUT_ID ,a.access_pt_unavl_ind,TRGT.dataset_id ,TRGT.creat_ts ,CURRENT_TIMESTAMP as mod_ts FROM ${hiveconf:AVAIL_MINUT_TARGET_TABLE} TRGT,MINUT_A a WHERE TRGT.ACCESS_PT_ID=a.ACCESS_PT_ID AND TRGT.LOCN_NBR=a.LOCN_NBR AND TRGT.ACCESS_PT_STAT_DT=a.ACCESS_PT_STAT_DT  AND  TRGT.ACCESS_PT_MINUT_ID=a.ACCESS_PT_MINUT_ID;
+
+CREATE TABLE IF NOT EXISTS  SHC_WIFI_ACCESS_PT_MINUT_AVAIL_left_join_A_without_map as select  TRGT.ACCESS_PT_ID,TRGT.ACCESS_PT_STAT_DT,TRGT.LOCN_NBR,TRGT.ACCESS_PT_MINUT_ID,a.access_pt_unavl_ind,TRGT.dataset_id,TRGT.creat_ts,a.mod_ts FROM ${hiveconf:AVAIL_MINUT_TARGET_TABLE} TRGT LEFT JOIN MINUT_A a on (TRGT.ACCESS_PT_ID=a.ACCESS_PT_ID and TRGT.LOCN_NBR=a.LOCN_NBR and TRGT.ACCESS_PT_STAT_DT=a.ACCESS_PT_STAT_DT AND TRGT.ACCESS_PT_MINUT_ID=a.ACCESS_PT_MINUT_ID);
+
+CREATE TABLE IF NOT EXISTS  SHC_WIFI_ACCESS_PT_MINUT_AVAIL_left_join_A as select /*+ MAPJOIN(a) */ TRGT.ACCESS_PT_ID,TRGT.ACCESS_PT_STAT_DT,TRGT.LOCN_NBR,TRGT.ACCESS_PT_MINUT_ID,a.access_pt_unavl_ind,TRGT.dataset_id,TRGT.creat_ts,a.mod_ts FROM ${hiveconf:AVAIL_MINUT_TARGET_TABLE} TRGT LEFT JOIN MINUT_A a on (TRGT.ACCESS_PT_ID=a.ACCESS_PT_ID and TRGT.LOCN_NBR=a.LOCN_NBR and TRGT.ACCESS_PT_STAT_DT=a.ACCESS_PT_STAT_DT AND TRGT.ACCESS_PT_MINUT_ID=a.ACCESS_PT_MINUT_ID);
+
+CREATE TABLE IF NOT EXISTS non_updated_null_rows_minut AS SELECT * from SHC_WIFI_ACCESS_PT_MINUT_AVAIL_left_join_A WHERE access_pt_unavl_ind IS NULL;
+
+CREATE TABLE IF NOT EXISTS non_updated_rows_minut as select TRGT.access_pt_id ,TRGT.access_pt_stat_dt,TRGT.locn_nbr,TRGT.ACCESS_PT_MINUT_ID,TRGT.access_pt_unavl_ind,TRGT.dataset_id ,TRGT.creat_ts ,TRGT.mod_ts FROM ${hiveconf:AVAIL_MINUT_TARGET_TABLE} TRGT, non_updated_null_rows_minut r WHERE TRGT.ACCESS_PT_ID=r.ACCESS_PT_ID AND TRGT.LOCN_NBR=r.LOCN_NBR AND TRGT.ACCESS_PT_STAT_DT=r.ACCESS_PT_STAT_DT AND TRGT.ACCESS_PT_MINUT_ID=r.ACCESS_PT_MINUT_ID -- AND TRGT.creat_ts=r.creat_ts AND TRGT.dataset_id=r.dataset_id  comment;
+
+CREATE TABLE IF NOT EXISTS SHC_WIFI_ACCESS_PT_MINUT_AVAIL_right_join_A AS select a.ACCESS_PT_ID,a.LOCN_NBR,a.ACCESS_PT_STAT_DT,a.ACCESS_PT_MINUT_ID,TRGT.access_pt_unavl_ind,a.dataset_id,a.creat_ts,TRGT.mod_ts FROM ${hiveconf:AVAIL_MINUT_TARGET_TABLE} TRGT RIGHT JOIN MINUT_A a on (TRGT.ACCESS_PT_ID=a.ACCESS_PT_ID and TRGT.LOCN_NBR=a.LOCN_NBR and TRGT.ACCESS_PT_STAT_DT=a.ACCESS_PT_STAT_DT  AND TRGT.ACCESS_PT_MINUT_ID=a.ACCESS_PT_MINUT_ID);
+
+CREATE TABLE IF NOT EXISTS insert_null_rows_minut AS SELECT * FROM SHC_WIFI_ACCESS_PT_MINUT_AVAIL_right_join_A where access_pt_unavl_ind IS NULL;
+
+CREATE TABLE IF NOT EXISTS INSERT_FINAL_MINUT AS SELECT  a.access_pt_id ,a.access_pt_stat_dt,a.locn_nbr ,a.ACCESS_PT_MINUT_ID ,a.access_pt_unavl_ind,a.dataset_id,a.creat_ts ,a.mod_ts FROM MINUT_A a,insert_null_rows_minut i WHERE a.ACCESS_PT_ID=i.ACCESS_PT_ID AND a.LOCN_NBR=i.LOCN_NBR AND a.ACCESS_PT_STAT_DT=i.ACCESS_PT_STAT_DT AND a.ACCESS_PT_MINUT_ID=i.ACCESS_PT_MINUT_ID AND a.creat_ts=i.creat_ts;
+
+CREATE TABLE IF NOT EXISTS SHC_WIFI_ACCESS_PT_MINUT_AVAIL_MERGE  AS  select * from updated_values_minut union all select distinct *  from non_updated_rows_minut  UNION ALL SELECT  distinct * FROM INSERT_FINAL_MINUT;
+
+
+
+
+s==========================================================================================================================
+
+SHC_WIFI_ACCESS_PT_AVAIL_MINUT_TABLE in Pig
+
+%default CURRENT_DATE `date +%Y%m%d`;
+%declare CURRENT_TIMESTAMP `date "+'%Y-%m-%d %H:%m:%S'"`
+
+
+ACCESS_PT_AVAIL_MINUT_Target  = LOAD '/incoming/netwatch/availability/SHC_WIFI_ACCESS_PT_AVAIL_MINUT_TABLE_20170413/' USING PigStorage(',') AS 
+    ( 
+    ACCESS_PT_ID:CHARARRAY,
+    ACCESS_PT_STAT_DT:CHARARRAY,
+    LOCN_NBR:INT,
+    ACCESS_PT_MINUT_ID:INT,
+    ACCESS_PT_UNAVL_IND:CHARARRAY,
+    DATASET_ID:INT,
+    CREAT_TS:CHARARRAY,
+    MOD_TS:CHARARRAY);
+
+MINUTE_A = LOAD '/user/hive/warehouse/minut_a' USING PigStorage(',') AS
+    (
+     ACCESS_PT_ID:CHARARRAY,
+     ACCESS_PT_STAT_DT:CHARARRAY,
+     LOCN_NBR:INT,
+     ACCESS_PT_MINUT_ID:INT,
+     ACCESS_PT_UNAVL_IND:CHARARRAY,
+     DATASET_ID:INT,
+     CREAT_TS:CHARARRAY,
+     MOD_TS:CHARARRAY);
+
+
+LEFT_JOIN = JOIN ACCESS_PT_AVAIL_MINUT_Target BY (ACCESS_PT_ID ,ACCESS_PT_STAT_DT ,LOCN_NBR ,ACCESS_PT_MINUT_ID ) left outer,MINUTE_A BY (ACCESS_PT_ID ,ACCESS_PT_STAT_DT ,LOCN_NBR ,ACCESS_PT_MINUT_ID );
+
+RIGHT_JOIN = JOIN ACCESS_PT_AVAIL_MINUT_Target BY (ACCESS_PT_ID ,ACCESS_PT_STAT_DT ,LOCN_NBR ,ACCESS_PT_MINUT_ID )  right outer,MINUTE_A  BY (ACCESS_PT_ID ,ACCESS_PT_STAT_DT ,LOCN_NBR ,ACCESS_PT_MINUT_ID ) ;
+
+
+a = FOREACH LEFT_JOIN GENERATE  ACCESS_PT_AVAIL_MINUT_Target::ACCESS_PT_ID,
+                                ACCESS_PT_AVAIL_MINUT_Target::ACCESS_PT_STAT_DT,
+                                ACCESS_PT_AVAIL_MINUT_Target::LOCN_NBR,
+                                ACCESS_PT_AVAIL_MINUT_Target::ACCESS_PT_MINUT_ID,
+                                (MINUTE_A::ACCESS_PT_ID IS NULL ? ACCESS_PT_AVAIL_MINUT_Target::ACCESS_PT_UNAVL_IND  : MINUTE_A::ACCESS_PT_UNAVL_IND),
+                                ACCESS_PT_AVAIL_MINUT_Target::DATASET_ID,
+                                ACCESS_PT_AVAIL_MINUT_Target::CREAT_TS,
+                                (MINUTE_A::ACCESS_PT_ID IS NULL ? ACCESS_PT_AVAIL_MINUT_Target::MOD_TS               : $CURRENT_TIMESTAMP);
+
+
+INSERT_VALUES = filter RIGHT_JOIN  BY ACCESS_PT_AVAIL_MINUT_Target::ACCESS_PT_ID is null;
+
+
+INSERT_NEW = foreach INSERT_VALUES  generate   MINUTE_A::ACCESS_PT_ID,
+                                               MINUTE_A::ACCESS_PT_STAT_DT,
+                                               MINUTE_A::LOCN_NBR,
+                                               MINUTE_A::ACCESS_PT_MINUT_ID,
+                                               MINUTE_A::ACCESS_PT_UNAVL_IND,
+                                               MINUTE_A::DATASET_ID,                                                                                                                                                   MINUTE_A::CREAT_TS,        
+                                               MINUTE_A::MOD_TS;
+
+UNION_DATA = UNION INSERT_NEW,a;
+
+STORE UNION_DATA into '/incoming/netwatch/availability/2017_04_18_april';
+
+
+==============================================================================================================
+
+SHC_WIFI_ACCESS_PT_AVAIL_TABLE in pig 
+
+ %default CURRENT_DATE `date +%Y%m%d`;
+%declare CURRENT_TIMESTAMP `date "+'%Y-%m-%d %H:%m:%S'"`
+
+ACCESS_PT_AVAIL_Target  = LOAD '/incoming/netwatch/availability/SHC_WIFI_ACCESS_PT_AVAIL_TABLE_20170413/' USING PigStorage(',') AS 
+    ( 
+    ACCESS_PT_ID:CHARARRAY,
+    ACCESS_PT_STAT_DT:CHARARRAY,
+    LOCN_NBR:INT,
+    ACCESS_PT_UNAVL_MINUT_QTY :INT,
+    ACCESS_PT_UNAVL_IND:CHARARRAY,
+    DATASET_ID:INT,
+    CREAT_TS:CHARARRAY,
+    MOD_TS:CHARARRAY);
+
+AVAIL_A = LOAD '/user/hive/warehouse/a' USING PigStorage(',') AS
+    (
+     ACCESS_PT_ID:CHARARRAY,
+     ACCESS_PT_STAT_DT:CHARARRAY,
+     LOCN_NBR:INT,
+     ACCESS_PT_UNAVL_MINUT_QTY:INT,
+     ACCESS_PT_UNAVL_IND:CHARARRAY,
+     DATASET_ID:INT,
+     CREAT_TS:CHARARRAY,
+     MOD_TS:CHARARRAY);
+
+INNER_JOIN = JOIN ACCESS_PT_AVAIL_Target BY (ACCESS_PT_ID ,ACCESS_PT_STAT_DT ,LOCN_NBR)            ,AVAIL_A BY (ACCESS_PT_ID ,ACCESS_PT_STAT_DT ,LOCN_NBR );
+
+LEFT_JOIN  = JOIN ACCESS_PT_AVAIL_Target BY (ACCESS_PT_ID ,ACCESS_PT_STAT_DT ,LOCN_NBR ) left outer,AVAIL_A BY (ACCESS_PT_ID ,ACCESS_PT_STAT_DT ,LOCN_NBR );
+
+RIGHT_JOIN = JOIN ACCESS_PT_AVAIL_Target BY (ACCESS_PT_ID ,ACCESS_PT_STAT_DT ,LOCN_NBR)  right outer,AVAIL_A  BY (ACCESS_PT_ID ,ACCESS_PT_STAT_DT ,LOCN_NBR ) ;
+
+
+a = FOREACH LEFT_JOIN GENERATE  ACCESS_PT_AVAIL_Target::ACCESS_PT_ID,
+  ACCESS_PT_AVAIL_Target::ACCESS_PT_STAT_DT,
+  ACCESS_PT_AVAIL_Target::LOCN_NBR,
+  (AVAIL_A::ACCESS_PT_ID IS NULL ? ACCESS_PT_AVAIL_Target::ACCESS_PT_UNAVL_MINUT_QTY: AVAIL_A::ACCESS_PT_UNAVL_MINUT_QTY),
+  (AVAIL_A::ACCESS_PT_ID IS NULL ? ACCESS_PT_AVAIL_Target::ACCESS_PT_UNAVL_IND: AVAIL_A::ACCESS_PT_UNAVL_IND),
+  ACCESS_PT_AVAIL_Target::DATASET_ID,
+  ACCESS_PT_AVAIL_Target::CREAT_TS,
+  (AVAIL_A::ACCESS_PT_ID IS NULL ? ACCESS_PT_AVAIL_Target::MOD_TS:$CURRENT_TIMESTAMP);
+
+INSERT_VALUES = filter RIGHT_JOIN  BY ACCESS_PT_AVAIL_Target::ACCESS_PT_ID is null;
+
+
+INSERT_NEW = foreach INSERT_VALUES  generate   AVAIL_A::ACCESS_PT_ID,
+                                               AVAIL_A::ACCESS_PT_STAT_DT,
+                                               AVAIL_A::LOCN_NBR,
+                                               AVAIL_A::ACCESS_PT_UNAVL_MINUT_QTY,
+                                               AVAIL_A::ACCESS_PT_UNAVL_IND,
+                                               AVAIL_A::DATASET_ID,                                                                                                                                                    AVAIL_A::CREAT_TS,        
+                                               AVAIL_A::MOD_TS;
+
+describe INSERT_NEW;
+describe a;
+
+UNION_DATA = UNION INSERT_NEW,a;
+--DUMP UNION_DATA;
+
+
+STORE UNION_DATA into '/incoming/netwatch/availability/UPDATEDVALUES_2017_04_22';
+
+
+
+
+
+
